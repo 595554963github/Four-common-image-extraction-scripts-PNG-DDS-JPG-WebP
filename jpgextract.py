@@ -6,21 +6,27 @@ def is_valid_jpg(data):
     # JPEG文件的结束标记
     end_marker = b'\xFF\xD9'
     # 数据块标记（JFIF或EXIF）
-    block_markers = [b'JFIF', b'Exif']
+    jfif_marker = b'JFIF'
+    exif_marker = b'Exif'
 
     # 检查JPEG文件的开始标记
     if not data.startswith(start_marker):
         return None
 
-    # 检查数据块开始标记
-    for block_marker in block_markers:
-        block_index = data.find(block_marker)
-        if block_index != -1:
-            # 检查文件尾标记
-            end_index = data.find(end_marker, block_index)
-            if end_index != -1:
-                # 提取JPEG数据
-                return data[:end_index + len(end_marker)]
+    # 检查JFIF数据块是否在开始标记后的10字节内
+    jfif_index = data.find(jfif_marker, 0, len(start_marker) + 10)
+    if jfif_index!= -1:
+        end_index = data.find(end_marker, jfif_index)
+        if end_index!= -1:
+            return data[:end_index + len(end_marker)]
+
+    # 若没有JFIF数据块，检查Exif数据块是否在开始标记后的32字节内
+    exif_index = data.find(exif_marker, len(start_marker), len(start_marker) + 32)
+    if exif_index!= -1:
+        end_index = data.find(end_marker, exif_index)
+        if end_index!= -1:
+            return data[:end_index + len(end_marker)]
+
     return None
 
 def find_jpg_in_file(file_path):
@@ -28,7 +34,7 @@ def find_jpg_in_file(file_path):
         file_content = file.read()
         jpg_start = file_content.find(b'\xFF\xD8\xFF\xE0')
         jpgs = []
-        while jpg_start != -1:
+        while jpg_start!= -1:
             # 从文件头开始查找有效的JPEG数据
             jpg_data = is_valid_jpg(file_content[jpg_start:])
             if jpg_data:

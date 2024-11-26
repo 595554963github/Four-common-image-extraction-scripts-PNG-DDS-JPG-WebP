@@ -3,14 +3,14 @@ import struct
 
 def extract_webp_data(file_content):
     riff_header = b'\x52\x49\x46\x46'
-    webp_header = b'\x57\x45\x42\x50\x56\x50\x38\x58'
+    webp_header = b'\x57\x45\x42\x50\x56\x50\x38'
 
     webp_data_start = file_content.find(riff_header)
     while webp_data_start != -1:
         file_size = struct.unpack('<I', file_content[webp_data_start + 4:webp_data_start + 8])[0]
         # 确保file_size是4字节对齐
         file_size = (file_size + 1) & ~1
-        if file_content[webp_data_start + 8:webp_data_start + 16] == webp_header:
+        if file_content[webp_data_start + 8:webp_data_start + 15] == webp_header:
             webp_data = file_content[webp_data_start:webp_data_start + file_size + 8]
             yield webp_data
         webp_data_start = file_content.find(riff_header, webp_data_start + file_size + 8)
