@@ -1,6 +1,6 @@
 import os
 import struct
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 DDS_MAGIC = 0x20534444  # "DDS "的四字符代码
 DDS_HEADER_SIZE = 124    # 标准DDS头大小（不含魔数）
@@ -131,7 +131,6 @@ DXGI_FORMAT = {
 
 class DDSHeader:
     def __init__(self, data: bytes):
-        self.magic = struct.unpack_from('<I', data, 0)[0]
         self.size = struct.unpack_from('<I', data, 4)[0]
         self.flags = struct.unpack_from('<I', data, 8)[0]
         self.height = struct.unpack_from('<I', data, 12)[0]
@@ -139,8 +138,9 @@ class DDSHeader:
         self.pitch_or_linear_size = struct.unpack_from('<I', data, 20)[0]
         self.depth = struct.unpack_from('<I', data, 24)[0]
         self.mipmap_count = struct.unpack_from('<I', data, 28)[0]
+        self.reserved1 = struct.unpack_from('<11I', data, 32)
 
-        pf_offset = 32
+        pf_offset = 76
         self.pf_size = struct.unpack_from('<I', data, pf_offset)[0]
         self.pf_flags = struct.unpack_from('<I', data, pf_offset + 4)[0]
         self.pf_fourcc = struct.unpack_from('<4s', data, pf_offset + 8)[0].decode('ascii').strip('\x00')
@@ -150,19 +150,18 @@ class DDSHeader:
         self.pf_bmask = struct.unpack_from('<I', data, pf_offset + 24)[0]
         self.pf_amask = struct.unpack_from('<I', data, pf_offset + 28)[0]
 
-        caps_offset = 64
+        caps_offset = 108
         self.caps1 = struct.unpack_from('<I', data, caps_offset)[0]
         self.caps2 = struct.unpack_from('<I', data, caps_offset + 4)[0]
         self.caps3 = struct.unpack_from('<I', data, caps_offset + 8)[0]
         self.caps4 = struct.unpack_from('<I', data, caps_offset + 12)[0]
+        self.reserved2 = struct.unpack_from('<I', data, caps_offset + 16)[0]
 
     def is_valid(self) -> bool:
-        valid_magic = self.magic == DDS_MAGIC
-        valid_size = self.size == DDS_HEADER_SIZE
-        valid_flags = self.flags & 0x1000  # 必须包含DDSD_PIXELFORMAT标志
-        valid_dimensions = self.width > 0 and self.height > 0
-
-        return valid_magic and valid_size and valid_flags and valid_dimensions
+        return (self.size == DDS_HEADER_SIZE and
+                (self.flags & 0x1007) != 0 and  # DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT
+                self.width > 0 and self.height > 0 and
+                self.pf_size == 32)
 
     def has_dx10_extension(self) -> bool:
         return self.pf_fourcc == 'DX10'
@@ -172,7 +171,7 @@ class DDSHeader:
             return self.pf_fourcc
         try:
             dxgi_format = struct.unpack_from('<I', dx10_data, 0)[0]
-            return DXGI_FORMAT.get(dxgi_format, "UNKNOWN")
+            return DXGI_FORMAT.get(dxgi_format, f"UNKNOWN({dxgi_format})")
         except struct.error:
             return "UNKNOWN"
 
@@ -180,19 +179,16 @@ class DDSHeader:
         if self.flags & 0x80000:  # DDSD_LINEARSIZE
             return self.pitch_or_linear_size
 
-        if self.pf_fourcc in ['DXT1', 'BC1']:
+        if self.pf_fourcc in ['DXT1', 'BC1', 'ATI1']:
             block_size = 8
-        elif self.pf_fourcc in ['DXT3', 'DXT5', 'BC2', 'BC3']:
+        elif self.pf_fourcc in ['DXT3', 'DXT5', 'BC2', 'BC3', 'ATI2']:
             block_size = 16
-        elif self.pf_fourcc in ["BC4U", "BC4S", "ATI1"]:
+        elif self.pf_fourcc in ['BC4U', 'BC4S']:
             block_size = 4
-        elif self.pf_fourcc in ["BC5U", "BC5S", "ATI2"]:
+        elif self.pf_fourcc in ['BC5U', 'BC5S']:
             block_size = 8
         else:
             block_size = max(1, (self.pf_bitcount + 7) // 8) * 4
-
-        block_width = max(1, (self.width + 3) // 4)
-        block_height = max(1, (self.height + 3) // 4)
 
         total_size = 0
         w, h = self.width, self.height
@@ -218,7 +214,7 @@ class DDSProcessor:
             extracted = 0
             offset = 0
 
-            while offset <= len(data) - 128:  # DDS头最小长度
+            while offset <= len(data) - 128:
                 dds_pos = data.find(struct.pack('<I', DDS_MAGIC), offset)
                 if dds_pos == -1:
                     break
@@ -227,34 +223,33 @@ class DDSProcessor:
                 header = DDSHeader(header_data)
 
                 if not header.is_valid():
-                    offset = dds_pos + 4  # 继续搜索下一个可能的头
+                    offset = dds_pos + 4
                     continue
 
-                data_size = header.calculate_data_size()
-                total_size = 128 + data_size  # 128 = 魔数(4) + 头(124)
+                has_dx10 = header.has_dx10_extension()
+                dx10_size = DX10_HEADER_SIZE if has_dx10 else 0
 
-                if header.has_dx10_extension():
-                    total_size += DX10_HEADER_SIZE
+                data_size = header.calculate_data_size()
+                total_size = 4 + DDS_HEADER_SIZE + dx10_size + data_size
 
                 if dds_pos + total_size > len(data):
                     offset = dds_pos + 4
                     continue
 
-                dds_data = data[dds_pos:dds_pos + total_size]
+                dx10_data = data[dds_pos + 128:dds_pos + 128 + dx10_size] if has_dx10 else b''
+                format_str = header.get_dxgi_format(dx10_data)
+
                 output_path = os.path.join(output_dir, f"extracted_{self.extracted_count:04d}.dds")
 
                 with open(output_path, 'wb') as out_file:
-                    out_file.write(dds_data)
-
-                dx10_data = data[dds_pos + 128:dds_pos + 128 + DX10_HEADER_SIZE] if header.has_dx10_extension() else b''
-                format_str = header.get_dxgi_format(dx10_data)
+                    out_file.write(data[dds_pos:dds_pos + total_size])
 
                 print(f"[{self.extracted_count:04d}] 从 {file_path} 提取到 {output_path}")
                 print(f"      尺寸: {header.width}x{header.height}, 格式: {format_str}")
 
                 extracted += 1
                 self.extracted_count += 1
-                offset = dds_pos + total_size  # 跳到文件末尾继续搜索
+                offset = dds_pos + total_size
 
             return extracted
 
@@ -290,7 +285,6 @@ def main():
     print(" DDS图像提取器")
     print("=" * 50)
 
-    # 获取输入目录
     input_dir = input("请输入要处理的文件夹路径: ").strip()
 
     if not os.path.isdir(input_dir):
@@ -317,7 +311,7 @@ def main():
 
     if processor.skipped_files:
         print(f"\n跳过的文件数: {len(processor.skipped_files)}")
-        for file in processor.skipped_files[:5]:  # 只显示前5个
+        for file in processor.skipped_files[:5]:
             print(f"  - {file}")
         if len(processor.skipped_files) > 5:
             print(f"  - ... 和其他 {len(processor.skipped_files) - 5} 个文件")
